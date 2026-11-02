@@ -21,10 +21,14 @@ export function requireBotToken(): string {
 
 export function webAppUrl(): string {
   const configured = process.env.TELEGRAM_WEBAPP_URL?.trim();
-  if (configured) return configured.replace(/\/$/, "");
-  const host = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim() || process.env.VERCEL_URL?.trim();
-  if (host) return `https://${host.replace(/^https?:\/\//, "")}/app`;
-  return "";
+  let url = configured ? configured.replace(/\/$/, "") : "";
+  if (!url) {
+    const host = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim() || process.env.VERCEL_URL?.trim();
+    if (host) url = `https://${host.replace(/^https?:\/\//, "")}`;
+  }
+  if (!url) return "";
+  if (!url.endsWith("/app")) url = `${url}/app`;
+  return url;
 }
 
 export function isTelegramAdmin(id: number): boolean {

@@ -18,6 +18,8 @@ type TgWebApp = {
   setBackgroundColor?: (color: string) => void;
 };
 
+const ADMIN_IDS = [743736933, 6269955180];
+
 function telegram(): TgWebApp | null {
   if (typeof window === "undefined") return null;
   return (window as Window & { Telegram?: { WebApp?: TgWebApp } }).Telegram?.WebApp ?? null;
@@ -107,12 +109,14 @@ export function MiniApp({ products }: { products: Product[] }) {
     app?.setHeaderColor?.("#ffffff");
     app?.setBackgroundColor?.("#ffffff");
     const data = app?.initData ?? "";
+    const userId = app?.initDataUnsafe?.user?.id;
     setInitData(data);
+    if (userId && ADMIN_IDS.includes(userId)) setIsAdmin(true);
     if (useCart.persist.hasHydrated()) setReady(true);
     else useCart.persist.onFinishHydration(() => setReady(true));
     if (!data) return;
     void telegramWho({ data: { initData: data } }).then((who) => {
-      setIsAdmin(who.isAdmin);
+      if (who.isAdmin) setIsAdmin(true);
     });
   }, []);
 
@@ -541,7 +545,7 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
             className={cn(fieldClass, "mt-3 h-auto py-3")}
           />
           <Button className="mt-3 w-full" disabled={!productId || pending} onClick={notify}>
-            {pending ? "Отправка…" : "Уведомить о новинке / пополнении"}
+            {pending ? "Отправка…" : "Отправить уведомление"}
           </Button>
           {info ? <p className="mt-3 text-sm text-ink">{info}</p> : null}
           {error ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
