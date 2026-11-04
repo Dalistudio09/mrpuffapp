@@ -1,8 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { getSql } from "@/lib/db";
+import { inferFlavorTags, isFlavorTag } from "@/lib/flavors";
 import { buildOrderMessage } from "@/lib/order-text";
-import { isTelegramAdmin, sendTelegram, shopButton, verifyInitData, webAppUrl } from "@/lib/telegram";
-import type { OrderItem, Product, ShopOrder } from "@/lib/types";
+import { isTelegramAdmin, sendTelegram, shopButton, verifyInitData } from "@/lib/telegram";
+import type { FlavorTag, OrderItem, Product, ShopOrder } from "@/lib/types";
 
 type ProductRow = {
   id: number;
@@ -24,6 +25,54 @@ function cleanText(value: unknown, label: string, min: number, max: number): str
   const text = value.trim();
   if (text.length < min || text.length > max) fail(`Проверьте поле «${label}»`);
   return text;
+}
+
+function cleanPrice(value: unknown): number {
+  const price = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(price) || price < 0 || price > 1_000_000) fail("Укажите цену целым числом");
+  return price;
+}
+
+function cleanImageUrl(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string") fail("Некорректная ссылка на фото");
+  const url = value.trim();
+  if (!url) return null;
+  if (url.startsWith("/") || url.startsWith("https://")) return url;
+  fail("Ссылка на фото должна начинаться с https:// или /");
+}
+
+function cloudinaryCreds() {
+  const cloud = process.env.CLOUDINARY_CLOUD_NAME?.trim() || "pshemfsk";
+  const apiKey = process.env.CLOUDINARY_API_KEY?.trim() || "716959298792494";
+  const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim() || "dpUnoMNAqTxUEfX9RmWQ11L4phg";
+  if (!cloud || !apiKey || !apiSecret) return null;
+  return { cloud, apiKey, apiSecret };
+}
+
+async function sha1hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function uploadToCloudinary(file: File): Promise<string> {
+  const creds = cloudinaryCreds();
+  if (!creds) fail("Cloudinary не настроен");
+  const { cloud, apiKey, apiSecret } = creds;
+  const timestamp = Math.round(Date.now() / 1000);
+  const folder = "mr-puff";
+  const signature = await sha1hex(`folder=${folder}&timestamp=${timestamp}${apiSecret}`);
+  const body = new FormData();
+  body.append("file", file);
+  body.append("api_key", apiKey);
+  body.append("timestamp", String(timestamp));
+  body.append("signature", signature);
+  body.append("folder", folder);
+  const response = await fetch(`https://api.cloudinary.com/v1_1/${cloud}/image/upload`, { method: "POST", body });
+  if (!response.ok) fail("Не удалось загрузить фото");
+  const json = (await response.json()) as { secure_url?: string };
+  if (!json.secure_url) fail("Cloudinary не вернул ссылку");
+  return json.secure_url;
 }
 
 function mapProduct(row: ProductRow): Product {
@@ -198,7 +247,6 @@ export const telegramAdmin = createServerFn({ method: "POST" })
       await sql<ProductRow>`
         select id, brand, model, flavor, flavor_types, price, image_url, active
         from products
-        where active = true
         order by sort_order, id
       `
     ).map(mapProduct);
@@ -233,49 +281,127 @@ export const telegramAdmin = createServerFn({ method: "POST" })
   });
 
 export const sendRestock = createServerFn({ method: "POST" })
-  .validator((data: { initData?: string; productId?: number; note?: string }) => {
-    const productId = Number(data?.productId);
-    if (!Number.isInteger(productId) || productId < 1) fail("Выберите товар");
-    const note = typeof data?.note === "string" ? data.note.trim().slice(0, 300) : "";
+  .validator((data: { initData?: string; text?: string }) => {
+    const text = typeof data?.text === "string" ? data.text.trim() : "";
+    if (text.length < 2 || text.length > 500) fail("Напишите текст уведомления");
     return {
       initData: typeof data?.initData === "string" ? data.initData : "",
-      productId,
-      note,
+      text,
     };
   })
   .handler(async ({ data }) => {
     await requireAdminUser(data.initData);
     const sql = await getSql();
-    const rows = await sql<ProductRow>`
-      select id, brand, model, flavor, flavor_types, price, image_url, active
-      from products where id = ${data.productId} and active = true
-    `;
-    const product = rows[0];
-    if (!product) fail("Товар не найден");
     const customers = await sql<{ chat_id: number }>`select chat_id from telegram_customers`;
     if (customers.length === 0) fail("Пока некому писать: ещё нет заказов из Mini App");
-    const text = [
-      "Mr.Puff — пополнение",
-      "",
-      `${product.brand} ${product.model}`,
-      product.flavor,
-      data.note,
-      "",
-      "Откройте магазин и закажите.",
-    ]
-      .filter((line) => line !== undefined && line !== "")
-      .join("\n");
     const button = shopButton();
     let sent = 0;
     let failed = 0;
     for (const customer of customers) {
       try {
-        await sendTelegram(customer.chat_id, text, button ? { reply_markup: button } : undefined);
+        await sendTelegram(customer.chat_id, data.text, button ? { reply_markup: button } : undefined);
         sent += 1;
       } catch {
         failed += 1;
       }
     }
-    if (sent === 0) fail("Не удалось отправить. Проверьте TELEGRAM_BOT_TOKEN и TELEGRAM_WEBAPP_URL.");
-    return { sent, failed, audience: customers.length, url: webAppUrl() };
+    if (sent === 0) fail("Не удалось отправить. Проверьте TELEGRAM_BOT_TOKEN.");
+    return { sent, failed, audience: customers.length };
+  });
+
+type ProductIn = {
+  initData?: string;
+  id?: number | null;
+  brand?: string;
+  model?: string;
+  flavor?: string;
+  price?: number;
+  imageUrl?: string | null;
+  active?: boolean;
+};
+
+export const telegramSaveProduct = createServerFn({ method: "POST" })
+  .validator((data: ProductIn) => {
+    const id = data.id == null || data.id === 0 ? null : Number(data.id);
+    if (id != null && (!Number.isInteger(id) || id < 1)) fail("Некорректный товар");
+    const flavor = cleanText(data.flavor, "вкус", 1, 80);
+    const tags = inferFlavorTags(flavor).filter(isFlavorTag);
+    return {
+      initData: typeof data.initData === "string" ? data.initData : "",
+      id,
+      brand: cleanText(data.brand, "бренд", 1, 40),
+      model: cleanText(data.model, "модель", 1, 60),
+      flavor,
+      flavorTypes: (tags.length ? tags : ["other"]) as FlavorTag[],
+      price: cleanPrice(data.price),
+      imageUrl: cleanImageUrl(data.imageUrl),
+      active: data.active !== false,
+    };
+  })
+  .handler(async ({ data }) => {
+    await requireAdminUser(data.initData);
+    const sql = await getSql();
+    const types = data.flavorTypes.join(",");
+    try {
+      if (data.id == null) {
+        await sql.query(
+          `insert into products (brand, model, flavor, flavor_types, price, image_url, active, sort_order)
+           values ($1, $2, $3, $4, $5, $6, $7, (select coalesce(max(sort_order), 0) + 1 from products))`,
+          [data.brand, data.model, data.flavor, types, data.price, data.imageUrl, data.active],
+        );
+      } else {
+        const rows = await sql.query<{ id: number }>(
+          `update products
+           set brand = $1, model = $2, flavor = $3, flavor_types = $4, price = $5, image_url = $6, active = $7
+           where id = $8 returning id`,
+          [data.brand, data.model, data.flavor, types, data.price, data.imageUrl, data.active, data.id],
+        );
+        if (!rows[0]) fail("Товар не найден");
+      }
+    } catch (err) {
+      const error = err as { code?: string; message?: string };
+      if (error.code === "23505" || /unique/i.test(error.message ?? "")) fail("Такая позиция уже есть");
+      throw err;
+    }
+    return { ok: true };
+  });
+
+export const telegramDeleteProduct = createServerFn({ method: "POST" })
+  .validator((data: { initData?: string; id?: number }) => {
+    const id = Number(data?.id);
+    if (!Number.isInteger(id) || id < 1) fail("Некорректный товар");
+    return { initData: typeof data?.initData === "string" ? data.initData : "", id };
+  })
+  .handler(async ({ data }) => {
+    await requireAdminUser(data.initData);
+    const sql = await getSql();
+    await sql.query(`delete from products where id = $1`, [data.id]);
+    return { ok: true };
+  });
+
+export const telegramUploadImage = createServerFn({ method: "POST" })
+  .validator((data: unknown) => {
+    if (!(data instanceof FormData)) fail("Ожидался файл");
+    return data;
+  })
+  .handler(async ({ data }) => {
+    await requireAdminUser(String(data.get("initData") ?? ""));
+    const file = data.get("file");
+    if (!(file instanceof File)) fail("Выберите фото");
+    if (file.size <= 0 || file.size > 3_500_000) fail("Фото должно быть меньше 3.5 МБ");
+    const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
+    if (file.type && !allowed.has(file.type)) fail("Нужен файл JPG, PNG или WebP");
+    const imageUrl = await uploadToCloudinary(file);
+    const idRaw = data.get("productId");
+    const id = typeof idRaw === "string" && idRaw ? Number(idRaw) : null;
+    if (id != null) {
+      if (!Number.isInteger(id) || id < 1) fail("Некорректный товар");
+      const sql = await getSql();
+      const rows = await sql.query<{ id: number }>(
+        `update products set image_url = $1 where id = $2 returning id`,
+        [imageUrl, id],
+      );
+      if (!rows[0]) fail("Товар не найден");
+    }
+    return { imageUrl };
   });

@@ -6,7 +6,7 @@ import { cn } from "@/lib/cn";
 import { cartCount, cartTotal, useCart, type CartLine } from "@/lib/cart-store";
 import { lineKey } from "@/lib/flavors";
 import { formatPrice, formatWhen } from "@/lib/format";
-import { placeTelegramOrder, sendRestock, telegramAdmin, telegramWho } from "@/lib/telegram.functions";
+import { placeTelegramOrder, sendRestock, telegramAdmin, telegramDeleteProduct, telegramSaveProduct, telegramUploadImage, telegramWho } from "@/lib/telegram.functions";
 import type { Product } from "@/lib/types";
 
 type TgWebApp = {
@@ -16,6 +16,8 @@ type TgWebApp = {
   expand: () => void;
   setHeaderColor?: (color: string) => void;
   setBackgroundColor?: (color: string) => void;
+  safeAreaInset?: { top?: number; bottom?: number };
+  contentSafeAreaInset?: { top?: number; bottom?: number };
 };
 
 const ADMIN_IDS = [743736933, 6269955180];
@@ -98,6 +100,7 @@ export function MiniApp({ products }: { products: Product[] }) {
   const [isAdmin, setIsAdmin] = useState(false);
   const [cartOpen, setCartOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [topPad, setTopPad] = useState(56);
   const items = useCart((state) => state.items);
   const setQty = useCart((state) => state.setQty);
   const clear = useCart((state) => state.clear);
@@ -110,6 +113,8 @@ export function MiniApp({ products }: { products: Product[] }) {
     app?.setBackgroundColor?.("#ffffff");
     const data = app?.initData ?? "";
     const userId = app?.initDataUnsafe?.user?.id;
+    const inset = app?.contentSafeAreaInset?.top || app?.safeAreaInset?.top || 0;
+    setTopPad(Math.max(inset + 12, 64));
     setInitData(data);
     if (userId && ADMIN_IDS.includes(userId)) setIsAdmin(true);
     if (useCart.persist.hasHydrated()) setReady(true);
@@ -130,7 +135,7 @@ export function MiniApp({ products }: { products: Product[] }) {
 
   return (
     <div className="min-h-screen bg-white">
-      <header className="sticky top-0 z-40 border-b border-line bg-white">
+      <header className="sticky top-0 z-40 border-b border-line bg-white" style={{ paddingTop: topPad }}>
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between gap-3 px-5">
           <a href="#catalog" className="flex min-w-0 items-center gap-2 text-ink">
             <img src="/brand/mark.png" alt="" className="h-10 w-auto shrink-0" />
@@ -485,36 +490,108 @@ function CartSheet({
 
 function AdminSheet({ open, initData, onClose }: { open: boolean; initData: string; onClose: () => void }) {
   const [data, setData] = useState<Awaited<ReturnType<typeof telegramAdmin>> | null>(null);
-  const [productId, setProductId] = useState("");
-  const [note, setNote] = useState("");
+  const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [pending, setPending] = useState(false);
+  const [draft, setDraft] = useState<Product | null>(null);
+  const [tab, setTab] = useState<"products" | "orders" | "notify">("products");
+
+  async function reload() {
+    const next = await telegramAdmin({ data: { initData } });
+    setData(next);
+  }
 
   useEffect(() => {
     if (!open) return;
-    void telegramAdmin({ data: { initData } })
-      .then(setData)
-      .catch((err) => setError(messageOf(err)));
+    void reload().catch((err) => setError(messageOf(err)));
   }, [open, initData]);
 
   if (!open) return null;
 
   async function notify() {
-    if (!productId) return;
+    if (text.trim().length < 2) return;
     if (!window.confirm("Отправить уведомление всем, кто заказывал в Mini App?")) return;
     setPending(true);
     setError("");
     setInfo("");
     try {
-      const result = await sendRestock({ data: { initData, productId: Number(productId), note } });
+      const result = await sendRestock({ data: { initData, text } });
       setInfo(`Отправлено: ${result.sent}${result.failed ? `, не доставлено: ${result.failed}` : ""}`);
+      setText("");
     } catch (err) {
       setError(messageOf(err));
     } finally {
       setPending(false);
     }
   }
+
+  async function saveProduct(event: FormEvent) {
+    event.preventDefault();
+    if (!draft) return;
+    setPending(true);
+    setError("");
+    try {
+      await telegramSaveProduct({
+        data: {
+          initData,
+          id: draft.id || null,
+          brand: draft.brand,
+          model: draft.model,
+          flavor: draft.flavor,
+          price: draft.price,
+          imageUrl: draft.imageUrl,
+          active: draft.active,
+        },
+      });
+      setDraft(null);
+      await reload();
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function removeProduct(id: number) {
+    if (!window.confirm("Удалить товар?")) return;
+    setError("");
+    try {
+      await telegramDeleteProduct({ data: { initData, id } });
+      await reload();
+    } catch (err) {
+      setError(messageOf(err));
+    }
+  }
+
+  async function onFile(file: File | undefined) {
+    if (!file || !draft) return;
+    setPending(true);
+    setError("");
+    try {
+      const body = new FormData();
+      body.set("file", file);
+      body.set("initData", initData);
+      if (draft.id) body.set("productId", String(draft.id));
+      const result = await telegramUploadImage({ data: body });
+      setDraft({ ...draft, imageUrl: result.imageUrl });
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  const blank = (): Product => ({
+    id: 0,
+    brand: "",
+    model: "",
+    flavor: "",
+    flavorTypes: ["other"],
+    price: 0,
+    imageUrl: null,
+    active: true,
+  });
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-end bg-black/40">
@@ -526,39 +603,97 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
             <X className="size-5" />
           </button>
         </div>
+        <div className="flex gap-2 overflow-x-auto border-b border-line px-5 py-3">
+          {(
+            [
+              ["products", "Товары"],
+              ["orders", "Заявки"],
+              ["notify", "Уведомление"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setTab(id)}
+              className={cn(
+                "inline-flex h-10 shrink-0 items-center rounded-full border px-4 text-sm",
+                tab === id ? "btn-grad border-transparent text-white" : "border-line bg-white text-ink",
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <div className="flex-1 overflow-y-auto px-5 py-5">
-          <p className="text-sm text-mist">Уведомить о новинке / пополнении</p>
-          <p className="mt-1 text-xs text-mist">Только вручную. Получатели: {data?.audience ?? 0}, кто уже заказывал в Mini App.</p>
-          <select value={productId} onChange={(event) => setProductId(event.target.value)} className={cn(fieldClass, "mt-3")}>
-            <option value="">Выберите товар</option>
-            {data?.products.map((product) => (
-              <option key={product.id} value={product.id}>
-                {product.brand} {product.model} — {product.flavor}
-              </option>
-            ))}
-          </select>
-          <textarea
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-            placeholder="Короткий текст, необязательно"
-            rows={3}
-            className={cn(fieldClass, "mt-3 h-auto py-3")}
-          />
-          <Button className="mt-3 w-full" disabled={!productId || pending} onClick={notify}>
-            {pending ? "Отправка…" : "Отправить уведомление"}
-          </Button>
-          {info ? <p className="mt-3 text-sm text-ink">{info}</p> : null}
-          {error ? <p className="mt-3 text-sm text-danger">{error}</p> : null}
-          <h3 className="mt-8 font-display text-2xl text-ink">Заявки</h3>
-          <div className="mt-3 grid gap-3">
-            {data?.orders.map((order) => (
-              <article key={order.id} className="rounded-lg border border-line p-3 text-sm">
-                <p className="font-medium">#{order.id} · {order.customerName} · {formatPrice(order.total)}</p>
-                <p className="text-mist">{order.phone} · {order.source === "telegram" ? "Telegram" : "Сайт"} · {formatWhen(order.createdAt)}</p>
-                <p className="mt-1 whitespace-pre-wrap text-mist">{order.comment}</p>
-              </article>
-            ))}
-          </div>
+          {error ? <p className="mb-3 text-sm text-danger">{error}</p> : null}
+          {tab === "notify" ? (
+            <div>
+              <p className="text-sm text-mist">Только вручную. Получатели: {data?.audience ?? 0}, кто уже заказывал в Mini App.</p>
+              <textarea
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+                placeholder="Текст уведомления"
+                rows={5}
+                maxLength={500}
+                className={cn(fieldClass, "mt-3 h-auto py-3")}
+              />
+              <Button className="mt-3 w-full" disabled={text.trim().length < 2 || pending} onClick={notify}>
+                {pending ? "Отправка…" : "Отправить уведомление"}
+              </Button>
+              {info ? <p className="mt-3 text-sm text-ink">{info}</p> : null}
+            </div>
+          ) : null}
+          {tab === "products" ? (
+            <div className="grid gap-3">
+              {draft ? (
+                <form className="grid gap-3" onSubmit={saveProduct}>
+                  <input value={draft.brand} onChange={(event) => setDraft({ ...draft, brand: event.target.value })} className={fieldClass} placeholder="Бренд" />
+                  <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} className={fieldClass} placeholder="Модель" />
+                  <input value={draft.flavor} onChange={(event) => setDraft({ ...draft, flavor: event.target.value })} className={fieldClass} placeholder="Вкус" />
+                  <input
+                    inputMode="numeric"
+                    value={draft.price || ""}
+                    onChange={(event) => setDraft({ ...draft, price: Number(event.target.value.replace(/\D/g, "")) })}
+                    className={fieldClass}
+                    placeholder="Цена"
+                  />
+                  <label className="flex items-center gap-2 text-sm text-mist">
+                    <input type="checkbox" checked={draft.active} onChange={(event) => setDraft({ ...draft, active: event.target.checked })} />
+                    В каталоге
+                  </label>
+                  {draft.imageUrl ? <img src={draft.imageUrl} alt="" className="h-28 w-full object-contain" /> : null}
+                  <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void onFile(event.target.files?.[0])} />
+                  <Button type="submit" disabled={pending}>Сохранить</Button>
+                  <Button type="button" variant="ghost" onClick={() => setDraft(null)}>Отмена</Button>
+                </form>
+              ) : (
+                <>
+                  <Button onClick={() => setDraft(blank())}>Добавить товар</Button>
+                  {data?.products.map((product) => (
+                    <article key={product.id} className="rounded-lg border border-line p-3 text-sm">
+                      <p className="font-medium">{product.brand} {product.model}</p>
+                      <p className="text-mist">{product.flavor} · {formatPrice(product.price)}{product.active ? "" : " · скрыт"}</p>
+                      <div className="mt-2 flex gap-2">
+                        <Button variant="ghost" className="h-10" onClick={() => setDraft(product)}>Править</Button>
+                        <Button variant="danger" className="h-10" onClick={() => void removeProduct(product.id)}>Удалить</Button>
+                      </div>
+                    </article>
+                  ))}
+                </>
+              )}
+            </div>
+          ) : null}
+          {tab === "orders" ? (
+            <div className="grid gap-3">
+              {data?.orders.map((order) => (
+                <article key={order.id} className="rounded-lg border border-line p-3 text-sm">
+                  <p className="font-medium">#{order.id} · {order.customerName} · {formatPrice(order.total)}</p>
+                  <p className="text-mist">{order.phone} · {order.source === "telegram" ? "Telegram" : "Сайт"} · {formatWhen(order.createdAt)}</p>
+                  <p className="mt-1 whitespace-pre-wrap text-mist">{order.comment}</p>
+                </article>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
