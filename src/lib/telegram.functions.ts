@@ -315,6 +315,7 @@ type ProductIn = {
   brand?: string;
   model?: string;
   flavor?: string;
+  flavorTypes?: string[];
   price?: number;
   imageUrl?: string | null;
   active?: boolean;
@@ -324,15 +325,17 @@ export const telegramSaveProduct = createServerFn({ method: "POST" })
   .validator((data: ProductIn) => {
     const id = data.id == null || data.id === 0 ? null : Number(data.id);
     if (id != null && (!Number.isInteger(id) || id < 1)) fail("Некорректный товар");
+    const picked = Array.isArray(data.flavorTypes) ? data.flavorTypes.filter(isFlavorTag) : [];
     const flavor = cleanText(data.flavor, "вкус", 1, 80);
-    const tags = inferFlavorTags(flavor).filter(isFlavorTag);
+    const tags = picked.length ? picked : inferFlavorTags(flavor).filter(isFlavorTag);
+    if (tags.length === 0) fail("Выберите тип вкуса");
     return {
       initData: typeof data.initData === "string" ? data.initData : "",
       id,
       brand: cleanText(data.brand, "бренд", 1, 40),
       model: cleanText(data.model, "модель", 1, 60),
       flavor,
-      flavorTypes: (tags.length ? tags : ["other"]) as FlavorTag[],
+      flavorTypes: tags as FlavorTag[],
       price: cleanPrice(data.price),
       imageUrl: cleanImageUrl(data.imageUrl),
       active: data.active !== false,

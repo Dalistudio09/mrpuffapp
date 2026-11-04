@@ -7,7 +7,7 @@ import { cartCount, cartTotal, useCart, type CartLine } from "@/lib/cart-store";
 import { lineKey } from "@/lib/flavors";
 import { formatPrice, formatWhen } from "@/lib/format";
 import { placeTelegramOrder, sendRestock, telegramAdmin, telegramDeleteProduct, telegramSaveProduct, telegramUploadImage, telegramWho } from "@/lib/telegram.functions";
-import type { Product } from "@/lib/types";
+import { FLAVOR_TAGS, type FlavorTag, type Product } from "@/lib/types";
 
 type TgWebApp = {
   initData: string;
@@ -494,8 +494,17 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [pending, setPending] = useState(false);
-  const [draft, setDraft] = useState<Product | null>(null);
-  const [tab, setTab] = useState<"products" | "orders" | "notify">("products");
+  const [draft, setDraft] = useState<{
+    id: number | null;
+    brand: string;
+    model: string;
+    flavor: string;
+    flavorTypes: FlavorTag[];
+    price: string;
+    imageUrl: string | null;
+    active: boolean;
+  } | null>(null);
+  const [tab, setTab] = useState<"products" | "orders" | "notify" | null>(null);
 
   async function reload() {
     const next = await telegramAdmin({ data: { initData } });
@@ -504,6 +513,8 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
 
   useEffect(() => {
     if (!open) return;
+    setTab(null);
+    setDraft(null);
     void reload().catch((err) => setError(messageOf(err)));
   }, [open, initData]);
 
@@ -535,11 +546,12 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
       await telegramSaveProduct({
         data: {
           initData,
-          id: draft.id || null,
+          id: draft.id,
           brand: draft.brand,
           model: draft.model,
           flavor: draft.flavor,
-          price: draft.price,
+          flavorTypes: draft.flavorTypes,
+          price: Number(draft.price),
           imageUrl: draft.imageUrl,
           active: draft.active,
         },
@@ -582,21 +594,27 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
     }
   }
 
-  const blank = (): Product => ({
-    id: 0,
-    brand: "",
-    model: "",
-    flavor: "",
-    flavorTypes: ["other"],
-    price: 0,
-    imageUrl: null,
-    active: true,
-  });
+  function blank() {
+    setDraft({ id: null, brand: "", model: "", flavor: "", flavorTypes: [], price: "", imageUrl: null, active: true });
+  }
+
+  function edit(product: Product) {
+    setDraft({
+      id: product.id,
+      brand: product.brand,
+      model: product.model,
+      flavor: product.flavor,
+      flavorTypes: product.flavorTypes,
+      price: String(product.price),
+      imageUrl: product.imageUrl,
+      active: product.active,
+    });
+  }
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-end bg-black/40">
       <button type="button" className="absolute inset-0" aria-label="Закрыть" onClick={onClose} />
-      <div className="relative flex max-h-[92vh] w-full max-w-lg flex-col rounded-t-2xl border border-line bg-white">
+      <div className="relative flex max-h-[calc(100dvh-4.5rem)] w-full max-w-lg flex-col rounded-t-2xl border border-line bg-white">
         <div className="flex items-center justify-between border-b border-line px-5 py-4">
           <h2 className="font-display text-3xl text-ink">Админ</h2>
           <button type="button" className="grid size-11 place-items-center" onClick={onClose} aria-label="Закрыть">
@@ -614,9 +632,12 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
             <button
               key={id}
               type="button"
-              onClick={() => setTab(id)}
+              onClick={() => {
+                setTab(id);
+                setDraft(null);
+              }}
               className={cn(
-                "inline-flex h-10 shrink-0 items-center rounded-full border px-4 text-sm",
+                "inline-flex h-11 shrink-0 items-center rounded-full border px-4 text-sm",
                 tab === id ? "btn-grad border-transparent text-white" : "border-line bg-white text-ink",
               )}
             >
@@ -624,8 +645,9 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
             </button>
           ))}
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-5">
+        <div className="safe-bottom flex-1 overflow-y-auto px-5 py-5">
           {error ? <p className="mb-3 text-sm text-danger">{error}</p> : null}
+          {tab === null ? <p className="text-mist">Выберите раздел.</p> : null}
           {tab === "notify" ? (
             <div>
               <p className="text-sm text-mist">Только вручную. Получатели: {data?.audience ?? 0}, кто уже заказывал в Mini App.</p>
@@ -643,45 +665,101 @@ function AdminSheet({ open, initData, onClose }: { open: boolean; initData: stri
               {info ? <p className="mt-3 text-sm text-ink">{info}</p> : null}
             </div>
           ) : null}
-          {tab === "products" ? (
+          {tab === "products" && !draft ? (
             <div className="grid gap-3">
-              {draft ? (
-                <form className="grid gap-3" onSubmit={saveProduct}>
-                  <input value={draft.brand} onChange={(event) => setDraft({ ...draft, brand: event.target.value })} className={fieldClass} placeholder="Бренд" />
-                  <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} className={fieldClass} placeholder="Модель" />
-                  <input value={draft.flavor} onChange={(event) => setDraft({ ...draft, flavor: event.target.value })} className={fieldClass} placeholder="Вкус" />
-                  <input
-                    inputMode="numeric"
-                    value={draft.price || ""}
-                    onChange={(event) => setDraft({ ...draft, price: Number(event.target.value.replace(/\D/g, "")) })}
-                    className={fieldClass}
-                    placeholder="Цена"
-                  />
-                  <label className="flex items-center gap-2 text-sm text-mist">
-                    <input type="checkbox" checked={draft.active} onChange={(event) => setDraft({ ...draft, active: event.target.checked })} />
-                    В каталоге
-                  </label>
-                  {draft.imageUrl ? <img src={draft.imageUrl} alt="" className="h-28 w-full object-contain" /> : null}
-                  <input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void onFile(event.target.files?.[0])} />
-                  <Button type="submit" disabled={pending}>Сохранить</Button>
-                  <Button type="button" variant="ghost" onClick={() => setDraft(null)}>Отмена</Button>
-                </form>
-              ) : (
-                <>
-                  <Button onClick={() => setDraft(blank())}>Добавить товар</Button>
-                  {data?.products.map((product) => (
-                    <article key={product.id} className="rounded-lg border border-line p-3 text-sm">
-                      <p className="font-medium">{product.brand} {product.model}</p>
-                      <p className="text-mist">{product.flavor} · {formatPrice(product.price)}{product.active ? "" : " · скрыт"}</p>
-                      <div className="mt-2 flex gap-2">
-                        <Button variant="ghost" className="h-10" onClick={() => setDraft(product)}>Править</Button>
-                        <Button variant="danger" className="h-10" onClick={() => void removeProduct(product.id)}>Удалить</Button>
-                      </div>
-                    </article>
-                  ))}
-                </>
-              )}
+              <Button onClick={blank}>Добавить товар</Button>
+              {data?.products.map((product) => (
+                <article key={product.id} className="rounded-lg border border-line p-3 text-sm">
+                  <p className="font-medium">{product.brand} {product.model}</p>
+                  <p className="text-mist">{product.flavor} · {formatPrice(product.price)}{product.active ? "" : " · скрыт"}</p>
+                  <div className="mt-2 flex gap-2">
+                    <Button variant="ghost" className="h-10" onClick={() => edit(product)}>Править</Button>
+                    <Button variant="danger" className="h-10" onClick={() => void removeProduct(product.id)}>Удалить</Button>
+                  </div>
+                </article>
+              ))}
             </div>
+          ) : null}
+          {tab === "products" && draft ? (
+            <form className="grid gap-4" onSubmit={saveProduct}>
+              <h3 className="font-display text-3xl text-ink">{draft.id ? "Редактирование" : "Новый товар"}</h3>
+              <label className="grid gap-2 text-sm text-mist">
+                Бренд
+                <input required value={draft.brand} onChange={(event) => setDraft({ ...draft, brand: event.target.value })} className={fieldClass} />
+              </label>
+              <label className="grid gap-2 text-sm text-mist">
+                Модель
+                <input required value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} className={fieldClass} />
+              </label>
+              <label className="grid gap-2 text-sm text-mist">
+                Вкус
+                <input required value={draft.flavor} onChange={(event) => setDraft({ ...draft, flavor: event.target.value })} className={fieldClass} />
+              </label>
+              <label className="grid gap-2 text-sm text-mist">
+                Цена, ₸
+                <input
+                  required
+                  inputMode="numeric"
+                  value={draft.price}
+                  onChange={(event) => setDraft({ ...draft, price: event.target.value.replace(/\D/g, "") })}
+                  className={fieldClass}
+                />
+              </label>
+              <label className="flex min-h-11 items-center gap-3 text-sm text-ink">
+                <input
+                  type="checkbox"
+                  checked={draft.active}
+                  onChange={(event) => setDraft({ ...draft, active: event.target.checked })}
+                  className="size-5 accent-tide"
+                />
+                В продаже
+              </label>
+              <fieldset>
+                <legend className="mb-2 text-sm text-mist">Тип вкуса</legend>
+                <div className="flex flex-wrap gap-2">
+                  {FLAVOR_TAGS.map((tag) => {
+                    const on = draft.flavorTypes.includes(tag.id);
+                    return (
+                      <button
+                        key={tag.id}
+                        type="button"
+                        aria-pressed={on}
+                        className={cn(
+                          "inline-flex min-h-11 items-center rounded-full border px-4 text-sm",
+                          on ? "btn-grad border-transparent text-white" : "border-line bg-white text-ink",
+                        )}
+                        onClick={() =>
+                          setDraft({
+                            ...draft,
+                            flavorTypes: on
+                              ? draft.flavorTypes.filter((item) => item !== tag.id)
+                              : [...draft.flavorTypes, tag.id],
+                          })
+                        }
+                      >
+                        {tag.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </fieldset>
+              <div className="flex items-center gap-4">
+                <div className="h-24 w-16 overflow-hidden rounded-sm bg-white">
+                  {draft.imageUrl ? <img src={draft.imageUrl} alt="" className="h-full w-full object-contain" /> : <DeviceArt brand={draft.brand || "PLONQ"} />}
+                </div>
+                <label className="inline-flex h-11 cursor-pointer items-center rounded-full border border-line px-4 text-sm text-ink">
+                  {pending ? "Загрузка…" : "Загрузить фото"}
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/avif"
+                    className="sr-only"
+                    onChange={(event) => void onFile(event.target.files?.[0])}
+                  />
+                </label>
+              </div>
+              <Button type="submit" disabled={pending}>Сохранить</Button>
+              <Button type="button" variant="ghost" onClick={() => setDraft(null)}>Отмена</Button>
+            </form>
           ) : null}
           {tab === "orders" ? (
             <div className="grid gap-3">
