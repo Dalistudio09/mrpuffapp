@@ -85,6 +85,24 @@ export async function sendTelegram(
   }
 }
 
+export async function sendTelegramPhoto(
+  chatId: number | string,
+  photo: string,
+  caption: string,
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const token = requireBotToken();
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, photo, caption, ...extra }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Telegram ${response.status}: ${body.slice(0, 180)}`);
+  }
+}
+
 export function shopButton() {
   const url = webAppUrl();
   if (!url) return undefined;
