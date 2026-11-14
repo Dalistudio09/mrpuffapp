@@ -1,6 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { defineHandler } from "nitro";
-import { getSql } from "../../../src/lib/db";
-import { sendTelegramPhoto, webAppUrl } from "../../../src/lib/telegram";
+import { sendTelegram, sendTelegramPhotoFile, webAppUrl } from "../../../src/lib/telegram";
 
 type Update = {
   message?: {
@@ -33,6 +33,23 @@ function miniAppUrl(event: { req: { headers: Headers } }): string {
   return base ? `${base}/app` : "";
 }
 
+async function loadWelcome(): Promise<Blob | null> {
+  const candidates = [
+    "public/brand/welcome.jpg",
+    "/var/task/public/brand/welcome.jpg",
+    "/var/task/.vercel/output/static/brand/welcome.jpg",
+  ];
+  for (const path of candidates) {
+    try {
+      const bytes = await readFile(path);
+      return new Blob([bytes], { type: "image/jpeg" });
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
 export default defineHandler(async (event) => {
   const update = (await event.req.json().catch(() => null)) as Update | null;
   const text = update?.message?.text?.trim() ?? "";
@@ -41,36 +58,24 @@ export default defineHandler(async (event) => {
   if (!chatId || command !== "/start") return { ok: true };
 
   const url = miniAppUrl(event);
-  const site = origin(event);
-  if (!url || !site) {
-    console.error("[telegram] Mini App URL is empty");
-    return { ok: true };
-  }
+  if (!url) return { ok: false, error: "no-url" };
 
-  const key = `tg_start_${chatId}`;
-  try {
-    const sql = await getSql();
-    const seen = await sql<{ value: string }>`select value from shop_settings where key = ${key}`;
-    if (seen[0]) return { ok: true };
-  } catch (err) {
-    console.error("[telegram] start dedupe skipped", err);
-  }
+  const markup = {
+    keyboard: [[{ text: "Открыть магазин", web_app: { url } }]],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 
   try {
-    await sendTelegramPhoto(chatId, `${site}/brand/welcome.jpg`, WELCOME, {
-      reply_markup: {
-        keyboard: [[{ text: "Открыть магазин", web_app: { url } }]],
-        resize_keyboard: true,
-        is_persistent: true,
-      },
-    });
-    const sql = await getSql();
-    await sql.query(
-      `insert into shop_settings (key, value) values ($1, $2) on conflict (key) do nothing`,
-      [key, new Date().toISOString()],
-    );
+    const photo = await loadWelcome();
+    if (photo) {
+      await sendTelegramPhotoFile(chatId, photo, "welcome.jpg", WELCOME, markup);
+      return { ok: true };
+    }
   } catch (err) {
-    console.error("[telegram] /start failed", err);
+    console.error("[telegram] photo failed", err);
   }
+
+  await sendTelegram(chatId, WELCOME, { reply_markup: markup });
   return { ok: true };
 });
