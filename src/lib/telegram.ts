@@ -103,6 +103,29 @@ export async function sendTelegramPhoto(
   }
 }
 
+export async function sendTelegramPhotoFile(
+  chatId: number | string,
+  file: Blob,
+  filename: string,
+  caption: string,
+  replyMarkup?: Record<string, unknown>,
+): Promise<void> {
+  const token = requireBotToken();
+  const body = new FormData();
+  body.set("chat_id", String(chatId));
+  body.set("caption", caption);
+  body.set("photo", file, filename);
+  if (replyMarkup) body.set("reply_markup", JSON.stringify(replyMarkup));
+  const response = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+    method: "POST",
+    body,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Telegram ${response.status}: ${text.slice(0, 180)}`);
+  }
+}
+
 export function shopButton() {
   const url = webAppUrl();
   if (!url) return undefined;
