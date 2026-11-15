@@ -59,7 +59,15 @@ function commandOf(update: Record<string, unknown> | null): string {
   return message?.text?.trim().split(/\s+/)[0]?.split("@")[0] ?? "";
 }
 
-async function loadWelcome(): Promise<Blob | null> {
+async function loadWelcome(site: string): Promise<Blob | null> {
+  if (site) {
+    try {
+      const response = await fetch(`${site}/brand/welcome.jpg`);
+      if (response.ok) return await response.blob();
+    } catch {
+      /* try local files */
+    }
+  }
   const candidates = [
     "public/brand/welcome.jpg",
     "/var/task/public/brand/welcome.jpg",
@@ -100,13 +108,11 @@ export default defineHandler(async (event) => {
   }
 
   const markup = {
-    keyboard: [[{ text: "Открыть магазин", web_app: { url } }]],
-    resize_keyboard: true,
-    is_persistent: true,
+    inline_keyboard: [[{ text: "Открыть магазин", web_app: { url } }]],
   };
 
   try {
-    const photo = await loadWelcome();
+    const photo = await loadWelcome(origin(event) || "https://mrpuffapp.vercel.app");
     if (photo) {
       await sendTelegramPhotoFile(chatId, photo, "welcome.jpg", WELCOME, markup);
       await logWebhook({ step: "sent-photo", updateId, chatId });
