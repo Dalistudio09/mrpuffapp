@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { defineHandler } from "nitro";
 import { sendTelegram, sendTelegramPhotoFile, webAppUrl } from "../../../src/lib/telegram";
+import { logWebhook } from "../../../src/lib/telegram-log";
 
 const WELCOME = "Добро пожаловать! У нас широкий ассортимент продукции.";
 
@@ -26,37 +27,36 @@ function miniAppUrl(event: { req: { headers: Headers } }): string {
   return base ? `${base}/app` : "";
 }
 
-async function readUpdate(event: { req: Request }): Promise<Record<string, unknown> | null> {
+async function readUpdate(event: { req: Request }): Promise<{ update: Record<string, unknown> | null; rawError?: string }> {
   try {
     const parsed = await event.req.json();
-    if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
-  } catch {
-    /* try text */
+    if (parsed && typeof parsed === "object") return { update: parsed as Record<string, unknown> };
+    return { update: null, rawError: "body-not-object" };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "json-failed";
+    try {
+      const raw = await event.req.text();
+      if (!raw) return { update: null, rawError: message };
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") return { update: parsed as Record<string, unknown> };
+      return { update: null, rawError: "text-not-object" };
+    } catch {
+      return { update: null, rawError: message };
+    }
   }
-  try {
-    const raw = await event.req.text();
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-  return null;
 }
 
 function chatIdOf(update: Record<string, unknown> | null): number | null {
   if (!update) return null;
-  const message = (update.message || update.edited_message) as { chat?: { id?: number }; text?: string } | undefined;
+  const message = (update.message || update.edited_message) as { chat?: { id?: number } } | undefined;
   const id = message?.chat?.id;
   return typeof id === "number" ? id : null;
 }
 
-function isStart(update: Record<string, unknown> | null): boolean {
-  if (!update) return false;
+function commandOf(update: Record<string, unknown> | null): string {
+  if (!update) return "";
   const message = (update.message || update.edited_message) as { text?: string } | undefined;
-  const text = message?.text?.trim() ?? "";
-  const command = text.split(/\s+/)[0]?.split("@")[0] ?? "";
-  return command === "/start";
+  return message?.text?.trim().split(/\s+/)[0]?.split("@")[0] ?? "";
 }
 
 async function loadWelcome(): Promise<Blob | null> {
@@ -77,12 +77,27 @@ async function loadWelcome(): Promise<Blob | null> {
 }
 
 export default defineHandler(async (event) => {
-  const update = await readUpdate(event as { req: Request });
+  const { update, rawError } = await readUpdate(event as { req: Request });
   const chatId = chatIdOf(update);
-  if (!chatId || !isStart(update)) return { ok: true };
+  const command = commandOf(update);
+  const updateId = typeof update?.update_id === "number" ? update.update_id : null;
+
+  if (!chatId || command !== "/start") {
+    await logWebhook({
+      step: "ignored",
+      updateId,
+      command: command || null,
+      chatId,
+      rawError: rawError ?? null,
+    });
+    return { ok: true };
+  }
 
   const url = miniAppUrl(event);
-  if (!url) return { ok: false, error: "no-url" };
+  if (!url) {
+    await logWebhook({ step: "no-url", updateId, chatId });
+    return { ok: false, error: "no-url" };
+  }
 
   const markup = {
     keyboard: [[{ text: "Открыть магазин", web_app: { url } }]],
@@ -94,17 +109,22 @@ export default defineHandler(async (event) => {
     const photo = await loadWelcome();
     if (photo) {
       await sendTelegramPhotoFile(chatId, photo, "welcome.jpg", WELCOME, markup);
+      await logWebhook({ step: "sent-photo", updateId, chatId });
       return { ok: true };
     }
+    await logWebhook({ step: "no-photo", updateId, chatId });
   } catch (err) {
-    console.error("[telegram] photo failed", err);
+    const message = err instanceof Error ? err.message : "photo-failed";
+    await logWebhook({ step: "photo-failed", updateId, chatId, error: message });
   }
 
   try {
     await sendTelegram(chatId, WELCOME, { reply_markup: markup });
+    await logWebhook({ step: "sent-text", updateId, chatId });
   } catch (err) {
-    console.error("[telegram] text failed", err);
-    return { ok: false, error: err instanceof Error ? err.message : "send-failed" };
+    const message = err instanceof Error ? err.message : "send-failed";
+    await logWebhook({ step: "text-failed", updateId, chatId, error: message });
+    return { ok: false, error: message };
   }
   return { ok: true };
 });
