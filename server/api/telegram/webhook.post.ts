@@ -2,13 +2,6 @@ import { readFile } from "node:fs/promises";
 import { defineHandler } from "nitro";
 import { sendTelegram, sendTelegramPhotoFile, webAppUrl } from "../../../src/lib/telegram";
 
-type Update = {
-  message?: {
-    text?: string;
-    chat?: { id?: number };
-  };
-};
-
 const WELCOME = "Добро пожаловать! У нас широкий ассортимент продукции.";
 
 function origin(event: { req: { headers: Headers } }): string {
@@ -33,6 +26,39 @@ function miniAppUrl(event: { req: { headers: Headers } }): string {
   return base ? `${base}/app` : "";
 }
 
+async function readUpdate(event: { req: Request }): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed = await event.req.json();
+    if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+  } catch {
+    /* try text */
+  }
+  try {
+    const raw = await event.req.text();
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function chatIdOf(update: Record<string, unknown> | null): number | null {
+  if (!update) return null;
+  const message = (update.message || update.edited_message) as { chat?: { id?: number }; text?: string } | undefined;
+  const id = message?.chat?.id;
+  return typeof id === "number" ? id : null;
+}
+
+function isStart(update: Record<string, unknown> | null): boolean {
+  if (!update) return false;
+  const message = (update.message || update.edited_message) as { text?: string } | undefined;
+  const text = message?.text?.trim() ?? "";
+  const command = text.split(/\s+/)[0]?.split("@")[0] ?? "";
+  return command === "/start";
+}
+
 async function loadWelcome(): Promise<Blob | null> {
   const candidates = [
     "public/brand/welcome.jpg",
@@ -51,11 +77,9 @@ async function loadWelcome(): Promise<Blob | null> {
 }
 
 export default defineHandler(async (event) => {
-  const update = (await event.req.json().catch(() => null)) as Update | null;
-  const text = update?.message?.text?.trim() ?? "";
-  const chatId = update?.message?.chat?.id;
-  const command = text.split(/\s+/)[0]?.split("@")[0] ?? "";
-  if (!chatId || command !== "/start") return { ok: true };
+  const update = await readUpdate(event as { req: Request });
+  const chatId = chatIdOf(update);
+  if (!chatId || !isStart(update)) return { ok: true };
 
   const url = miniAppUrl(event);
   if (!url) return { ok: false, error: "no-url" };
@@ -76,6 +100,11 @@ export default defineHandler(async (event) => {
     console.error("[telegram] photo failed", err);
   }
 
-  await sendTelegram(chatId, WELCOME, { reply_markup: markup });
+  try {
+    await sendTelegram(chatId, WELCOME, { reply_markup: markup });
+  } catch (err) {
+    console.error("[telegram] text failed", err);
+    return { ok: false, error: err instanceof Error ? err.message : "send-failed" };
+  }
   return { ok: true };
 });
